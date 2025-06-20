@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import json
-RKLLM_API_URL = 'http://192.168.1.157:1306/generate'
+RKLLM_API_URL = 'http://192.168.1.157:1306/v1/chat/completions'
 
 app = FastAPI()
 

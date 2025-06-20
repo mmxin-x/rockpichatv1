@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
 
-// Make sure this points at your Flask endpoint:
 const API_URL =
   import.meta.env.VITE_API_URL ||
   'http://192.168.1.157:1306/v1/chat/completions';
