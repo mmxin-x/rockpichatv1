@@ -15,8 +15,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RKLLM_API_URL = "http://<your-rkllm-host>:<port>/generate"  # update this
-
 # Reuse your LLM proxy function
 async def generate_response(prompt: str) -> str:
     async with httpx.AsyncClient() as client:
