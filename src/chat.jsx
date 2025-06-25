@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 
 const API_URL =
   import.meta.env.VITE_API_URL ||
-  'http://192.168.1.157:1306/v1/chat/completions';
+  'http://192.168.28.141:1306/v1/chat/completions';
 
 export default function Chat() {
   const [messages, setMessages] = useState([]);       // user/bot conversation
@@ -26,7 +26,7 @@ export default function Chat() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'qwen-0.6b',
+          model: 'qwen3-4b',
           messages: [{ role: 'user', content }],
         }),
       });
