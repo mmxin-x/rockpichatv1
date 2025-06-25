@@ -5,20 +5,29 @@ const API_URL =
   'http://192.168.1.157:1306/v1/chat/completions';
 
 export default function Chat() {
-  const [messages, setMessages] = useState([]);       // user/bot conversation
-  const [thinkSteps, setThinkSteps] = useState([]);   // extracted <think> content
+  const [messages, setMessages] = useState([]);       
+  const [thinkSteps, setThinkSteps] = useState([]);   
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const endRef = useRef(null);
+  const [sessionStart] = useState(() => new Date().toISOString())
+
+  const [sessionId] = useState(() =>
+    window.crypto?.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2)
+  );
 
   const sendMessage = async () => {
     const content = input.trim();
     if (!content) return;
 
     // 1) show user message
-    setMessages(m => [...m, { sender: 'user', text: content }]);
-    setInput('');
-    setIsSending(true);
+    const userMsg = { sender: 'user', text: content }
+    const interim = [...messages, userMsg]
+    setMessages(interim)
+    setInput('')
+    setIsSending(true)
 
     try {
       // 2) call chat endpoint
@@ -26,7 +35,7 @@ export default function Chat() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'qwen-0.6b',
+          // model: 'qwen-0.6b',
           messages: [{ role: 'user', content }],
         }),
       });
@@ -34,29 +43,46 @@ export default function Chat() {
       const data = await res.json();
       const fullReply = data.choices?.[0]?.message?.content || '';
 
-      // 3) extract all <think>...</think> sections
+      // 3) extract all <think> sections
       const thinkMatches = [...fullReply.matchAll(/<think>([\s\S]*?)<\/think>/gi)];
       const thinks = thinkMatches.map(m => m[1].trim());
-
-      // 4) strip out the <think> tags from the visible reply
       const visibleReply = fullReply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
       // 5) append to state
       if (thinks.length) {
         setThinkSteps(prev => [...prev, ...thinks]);
       }
-      setMessages(m => [...m, { sender: 'bot', text: visibleReply }]);
+      const botMsg = { sender: 'bot', text: visibleReply }
+      const updated = [...interim, botMsg]
+      setMessages(updated)
 
+      fetch('/__save_history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          sessionStart,
+          history: updated
+        }),
+      }).catch(console.error)
     } catch (err) {
-      console.error('chat error', err);
-      setMessages(m => [
-        ...m,
-        { sender: 'bot', text: '⚠️ Chat service unavailable.' },
-      ]);
+      console.error('chat error', err)
+      const errorMsg = { sender: 'bot', text: '⚠️ Chat service unavailable.' }
+      const updated = [...messages, errorMsg]
+      setMessages(updated)
+      fetch('/__save_history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          sessionStart,
+          history: updated
+        }),
+      }).catch(console.error)
     } finally {
-      setIsSending(false);
+      setIsSending(false)
     }
-  };
+  }
 
   const onKey = e => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -79,6 +105,7 @@ export default function Chat() {
       </div>
 
       {/* Process box */}
+      {/*
       <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-gray-100 border-b border-gray-200">
         <div className="text-gray-700 font-medium mb-2">Process</div>
         {thinkSteps.length === 0 && (
@@ -92,7 +119,7 @@ export default function Chat() {
             {step}
           </div>
         ))}
-      </div>
+      </div> */}
 
       {/* Conversation box */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
