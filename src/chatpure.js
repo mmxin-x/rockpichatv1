@@ -158,7 +158,7 @@
     }
   }
 
-  // ———— Events ————
+  // Events
   sendBtn.addEventListener('click', sendMessage);
   textarea.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -167,8 +167,8 @@
     }
   });
 
-  // ———— Initial render ————
-  renderProcess();
+  // Initial render
+  // renderProcess();
   renderMessages();
 
 })();
