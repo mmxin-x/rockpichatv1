@@ -1,4 +1,3 @@
-// chat.js
 ;(function(){
   // LLM CONFIG 
   const CHAT_URL = 'http://192.168.1.157:1306/v1/chat/completions';
