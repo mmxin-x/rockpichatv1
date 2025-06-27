@@ -1,4 +1,3 @@
-// chat.js
 ;(function(){
   // LLM CONFIG 
   const CHAT_URL = 'http://192.168.1.157:1306/v1/chat/completions';
@@ -158,7 +157,7 @@
     }
   }
 
-  // ———— Events ————
+  // Events
   sendBtn.addEventListener('click', sendMessage);
   textarea.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -167,8 +166,8 @@
     }
   });
 
-  // ———— Initial render ————
-  renderProcess();
+  // Initial render
+  // renderProcess();
   renderMessages();
 
 })();
