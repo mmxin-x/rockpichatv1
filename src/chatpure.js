@@ -4,8 +4,8 @@
   const CHAT_URL = 'http://192.168.1.157:1306/v1/chat/completions';
 
   // Session metadata 
-  const sessionId = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
-  const sessionStart = new Date().toISOString();
+  window.sessionId = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  window.sessionStart = new Date().toISOString();
 
   // window allows this to be a global variable
   window.chatHistory = [];    // Array<{ sender: 'user'|'bot', text: string }>
