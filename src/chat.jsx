@@ -19,7 +19,7 @@ export default function Chat() {
 
   // ===== Conversation =====
   const [messages, setMessages] = useState([
-    { sender: "bot", text: "Hi! **How can I help** today?\n\n- Ask me anything\n- Use *markdown* and ```code```" },
+    { sender: "bot", text: "Hi! **How can I help** today?\n\n- Ask me anything\n-" },
   ]);
   const [input, setInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false); // <-- button toggle
