@@ -2,12 +2,11 @@
 import React, { useEffect, useRef, useState } from "react";
 
 // ---- Your endpoints ----
-const API_URL   = "http://172.16.105.166:1306/v1/chat/completions";
-const STOP_URL  = "http://172.16.105.166:1306/v1/stop";
-const CLEAR_URL = "http://172.16.105.166:1306/v1/clear";
+const API_URL   = "http://172.20.10.4:1306/v1/chat/completions";
+const STOP_URL  = "http://172.20.10.4:1306/v1/stop";
+const CLEAR_URL = "http://172.20.10.4:1306/v1/clear";
 const MODEL = "qwen-0.6b";
-const STREAM = true;            // set false if your server doesn't stream
-const RESPONSE_TIMEOUT_MS = 180000; // 3 minutes, like your original script
+const RESPONSE_TIMEOUT_MS = 180000; // 3 minutes
 
 export default function Chat() {
   // ===== Sidebar & chats =====
@@ -20,28 +19,138 @@ export default function Chat() {
 
   // ===== Conversation =====
   const [messages, setMessages] = useState([
-    { sender: "bot", text: "Hi! How can I help today?" },
+    { sender: "bot", text: "Hi! **How can I help** today?\n\n- Ask me anything\n- Use *markdown* and ```code```" },
   ]);
   const [input, setInput] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false); // <-- button toggle state
+  const [isGenerating, setIsGenerating] = useState(false); // <-- button toggle
   const endRef = useRef(null);
 
-  // streaming control
+  // Streaming controls / guards
   const abortRef = useRef(null);
   const timeoutRef = useRef(null);
+  const botIndexRef = useRef(-1);   // index of the bot placeholder to append to
+  const sessionRef = useRef(0);     // unique per request
+  const lastEventRef = useRef("");  // de-dupe identical SSE frames
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // ========= Helpers for LLM comms =========
-  async function stopLLM() {
-    // Call your stop endpoint and cancel the stream
-    try {
-      await fetch(STOP_URL, { method: "POST" });
-    } catch (e) {
-      console.error("Error calling stop endpoint:", e);
+  // ========= Markdown formatting (safe, no external deps) =========
+  function escapeHtml(s) {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  function formatTextSegment(text) {
+    // Line-wise transforms: lists, headings, blockquotes
+    const lines = text.split("\n");
+    let out = [];
+    let inUl = false;
+    let inOl = false;
+
+    const closeLists = () => {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      if (inOl) { out.push("</ol>"); inOl = false; }
+    };
+
+    for (let line of lines) {
+      // Unordered list
+      const mUl = line.match(/^\s*[-*]\s+(.+)/);
+      if (mUl) {
+        if (!inUl) { closeLists(); out.push("<ul>"); inUl = true; }
+        out.push(`<li>${mUl[1]}</li>`);
+        continue;
+      }
+      // Ordered list
+      const mOl = line.match(/^\s*\d+\.\s+(.+)/);
+      if (mOl) {
+        if (!inOl) { closeLists(); out.push("<ol>"); inOl = true; }
+        out.push(`<li>${mOl[1]}</li>`);
+        continue;
+      }
+
+      // Not a list item
+      if (inUl || inOl) closeLists();
+
+      // Headings
+      let m;
+      if ((m = line.match(/^######\s+(.*)$/))) { out.push(`<h6>${m[1]}</h6>`); continue; }
+      if ((m = line.match(/^#####\s+(.*)$/)))  { out.push(`<h5>${m[1]}</h5>`); continue; }
+      if ((m = line.match(/^####\s+(.*)$/)))   { out.push(`<h4>${m[1]}</h4>`); continue; }
+      if ((m = line.match(/^###\s+(.*)$/)))    { out.push(`<h3>${m[1]}</h3>`); continue; }
+      if ((m = line.match(/^##\s+(.*)$/)))     { out.push(`<h2>${m[1]}</h2>`); continue; }
+      if ((m = line.match(/^#\s+(.*)$/)))      { out.push(`<h1>${m[1]}</h1>`); continue; }
+
+      // Blockquote
+      const bq = line.match(/^>\s?(.*)$/);
+      if (bq) { out.push(`<blockquote>${bq[1]}</blockquote>`); continue; }
+
+      // Plain line
+      out.push(line);
     }
+    closeLists();
+
+    let html = out.join("\n");
+
+    // Inline transforms (on text segments only)
+    // Links: [text](http(s)://url)
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener noreferrer" class="underline">$1</a>`);
+    // Inline code: `code`
+    html = html.replace(/`([^`]+)`/g, `<code class="px-1 py-0.5 rounded bg-gray-100 font-mono">$1</code>`);
+    // Bold then italic
+    html = html.replace(/\*\*(.+?)\*\*/g, `<strong>$1</strong>`);
+    html = html.replace(/(^|[^\*])\*(?!\s)(.+?)(?<!\s)\*(?!\*)/g, `$1<em>$2</em>`);
+
+    // Paragraphs: wrap chunks that aren't obvious blocks
+    const blocks = html.split(/\n{2,}/).map(chunk => {
+      const trimmed = chunk.trim();
+      if (!trimmed) return "";
+      if (/^<(ul|ol|h\d|pre|blockquote)/.test(trimmed)) return trimmed;
+      return `<p>${trimmed.replace(/\n/g, "<br />")}</p>`;
+    });
+
+    return blocks.join("\n");
+  }
+
+  function formatMarkdown(src) {
+    // 1) Escape HTML to avoid XSS
+    const escaped = escapeHtml(src);
+
+    // 2) Tokenize fenced code blocks ```lang\ncode\n```
+    const segments = [];
+    const re = /```([a-zA-Z0-9_-]+)?\n([\s\S]*?)```/g;
+    let lastIndex = 0;
+    let m;
+    while ((m = re.exec(escaped))) {
+      if (m.index > lastIndex) {
+        segments.push({ type: "text", value: escaped.slice(lastIndex, m.index) });
+      }
+      segments.push({ type: "code", lang: m[1] || "", code: m[2] });
+      lastIndex = re.lastIndex;
+    }
+    if (lastIndex < escaped.length) {
+      segments.push({ type: "text", value: escaped.slice(lastIndex) });
+    }
+
+    // 3) Format text segments; 4) Reinsert code blocks
+    const html = segments
+      .map(seg => {
+        if (seg.type === "code") {
+          return `<pre class="overflow-auto rounded bg-gray-900 text-gray-100 p-3"><code class="language-${seg.lang}">${seg.code}</code></pre>`;
+        }
+        return formatTextSegment(seg.value);
+      })
+      .join("");
+
+    return html;
+  }
+
+  // ========= LLM comms =========
+  async function stopLLM() {
+    try { await fetch(STOP_URL, { method: "POST" }); } catch (e) { console.error("stop error:", e); }
     abortRef.current?.abort();
   }
 
@@ -49,16 +158,14 @@ export default function Chat() {
     try {
       const res = await fetch(CLEAR_URL, { method: "POST" });
       if (!res.ok) console.error(`Clear-cache failed: HTTP ${res.status}`);
-    } catch (e) {
-      console.error("Error calling clear endpoint:", e);
-    }
+    } catch (e) { console.error("clear error:", e); }
   }
 
   async function callLLM(prompt, signal, onChunk) {
     const payload = {
       model: MODEL,
       messages: [{ role: "user", content: prompt }],
-      stream: STREAM,
+      stream: true,
     };
 
     const res = await fetch(API_URL, {
@@ -69,14 +176,6 @@ export default function Chat() {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    if (!STREAM) {
-      const data = await res.json();
-      const text = data?.choices?.[0]?.message?.content ?? "(no content)";
-      onChunk(text);
-      return;
-    }
-
-    // Streaming (SSE-like)
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -86,18 +185,27 @@ export default function Chat() {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      const parts = buffer.split("\n\n");
+      // Split on blank line (CRLF/LF safe)
+      const parts = buffer.split(/\r?\n\r?\n/);
       buffer = parts.pop() || "";
+
       for (let part of parts) {
         if (!part.startsWith("data:")) continue;
         const data = part.replace(/^data:\s*/, "").trim();
+        if (!data) continue;
         if (data === "[DONE]") return;
+
+        // De-dupe identical raw frames (some proxies resend)
+        if (data === lastEventRef.current) continue;
+        lastEventRef.current = data;
+
         try {
           const json = JSON.parse(data);
-          const chunk = json?.choices?.[0]?.delta?.content;
-          if (chunk) onChunk(chunk);
+          const delta = json?.choices?.[0]?.delta ?? {};
+          if (typeof delta.content !== "string" || !delta.content) continue;
+          onChunk(delta.content);
         } catch {
-          // ignore malformed chunk
+          // ignore malformed
         }
       }
     }
@@ -107,7 +215,6 @@ export default function Chat() {
   async function onSendOrStop(e) {
     e?.preventDefault?.();
 
-    // If already generating -> STOP
     if (isGenerating) {
       await stopLLM();
       return;
@@ -116,46 +223,54 @@ export default function Chat() {
     const text = input.trim();
     if (!text) return;
 
-    // Push user message and clear input
-    setMessages((m) => [...m, { sender: "user", text }]);
+    // If somehow a stream is alive, stop it first
+    if (abortRef.current) await stopLLM();
+
+    // new session + reset de-dupe
+    sessionRef.current += 1;
+    const mySession = sessionRef.current;
+    lastEventRef.current = "";
+
+    // push user + ONE bot placeholder in one update
+    setMessages(prev => {
+      const next = [...prev, { sender: "user", text }, { sender: "bot", text: "" }];
+      botIndexRef.current = next.length - 1;
+      return next;
+    });
     setInput("");
+    setIsGenerating(true);
 
-    // Insert empty bot placeholder to stream into
-    setMessages((m) => [...m, { sender: "bot", text: "" }]);
-
-    // start streaming
-    setIsGenerating(true); // <-- button shows "Stop"
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // timeout guard
     clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(async () => {
-      if (abortRef.current) {
-        alert("⚠️ Response timed out.");
-        await stopLLM();
-      }
+      if (mySession !== sessionRef.current) return;
+      alert("⚠️ Response timed out.");
+      await stopLLM();
     }, RESPONSE_TIMEOUT_MS);
 
     try {
       await callLLM(text, controller.signal, (chunk) => {
-        setMessages((m) => {
-          const copy = [...m];
-          const last = copy[copy.length - 1];
-          if (last && last.sender === "bot") last.text += chunk;
+        if (mySession !== sessionRef.current) return; // stale stream
+        setMessages(prev => {
+          const copy = [...prev];
+          const i = botIndexRef.current;
+          if (copy[i]) copy[i] = { ...copy[i], text: copy[i].text + chunk };
           return copy;
         });
       });
     } catch (err) {
-      setMessages((m) => {
-        const copy = [...m];
-        const last = copy[copy.length - 1];
-        if (last && last.sender === "bot") {
-          if (err?.name === "AbortError") {
-            last.text += "\n⚠️ Generation stopped.";
-          } else {
-            last.text += "\n⚠️ Chat service unavailable.";
-          }
+      setMessages(prev => {
+        const copy = [...prev];
+        const i = botIndexRef.current;
+        if (copy[i]) {
+          copy[i] = {
+            ...copy[i],
+            text:
+              copy[i].text +
+              (err?.name === "AbortError" ? "\n⚠️ Generation stopped." : "\n⚠️ Chat service unavailable."),
+          };
         }
         return copy;
       });
@@ -163,7 +278,7 @@ export default function Chat() {
     } finally {
       clearTimeout(timeoutRef.current);
       abortRef.current = null;
-      setIsGenerating(false); // <-- button back to "Send"
+      setIsGenerating(false);
     }
   }
 
@@ -175,7 +290,6 @@ export default function Chat() {
     }
   };
 
-  // For your original "buttontoggle" (keyboard on the button)
   const buttontoggle = (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
@@ -184,20 +298,14 @@ export default function Chat() {
   };
 
   const onNewChat = async () => {
-    // visually switch active chat
     const id = String(Date.now());
-    setChats((prev) =>
-      prev.map((c) => ({ ...c, active: false })).concat({ id, title: "New chat", active: true })
-    );
-    // clear UI messages
+    setChats(prev => prev.map(c => ({ ...c, active: false })).concat({ id, title: "New chat", active: true }));
     setMessages([{ sender: "bot", text: "Started a new chat 👋" }]);
-    // call your CLEAR endpoint
     await clearCache();
   };
 
   const onSelectChat = (id) => {
-    setChats((prev) => prev.map((c) => ({ ...c, active: c.id === id })));
-    // demo: pretend to load a convo
+    setChats(prev => prev.map(c => ({ ...c, active: c.id === id })));
     setMessages([
       { sender: "bot", text: `Loaded conversation ${id}` },
       { sender: "user", text: "Cool, thanks!" },
@@ -205,9 +313,9 @@ export default function Chat() {
   };
 
   const onDeleteChat = (id) => {
-    setChats((prev) => {
-      const next = prev.filter((c) => c.id !== id);
-      if (!next.some((c) => c.active) && next.length) {
+    setChats(prev => {
+      const next = prev.filter(c => c.id !== id);
+      if (!next.some(c => c.active) && next.length) {
         next[0].active = true;
         setMessages([{ sender: "bot", text: "Switched to first chat." }]);
       } else if (next.length === 0) {
@@ -217,6 +325,7 @@ export default function Chat() {
     });
   };
 
+  // ===== Sidebar =====
   const Sidebar = () => (
     <>
       {/* Desktop sidebar */}
@@ -282,7 +391,7 @@ export default function Chat() {
           aria-hidden="true"
         />
         <aside
-          className={`absolute left-0 top-0 h-full w-72 bg-white border-r shadow-xl transition-transform ${
+          className={`absolute left-0 top-0 h/full w-72 bg-white border-r shadow-xl transition-transform ${
             sidebarOpen ? "translate-x-0" : "-translate-x-full"
           }`}
           role="dialog"
@@ -306,7 +415,7 @@ export default function Chat() {
                 await onNewChat();
                 setSidebarOpen(false);
               }}
-              className="w-full mb-3 px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700"
+              className="w/full mb-3 px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700"
             >
               New Chat
             </button>
@@ -373,13 +482,16 @@ export default function Chat() {
             {messages.map((m, i) => (
               <div
                 key={i}
-                className={`max-w-[75%] px-4 py-2 rounded-lg shadow-sm ${
+                className={`max-w-[75%] px-4 py-2 rounded-lg shadow-sm prose prose-sm max-w-none ${
                   m.sender === "user"
                     ? "bg-blue-500 text-white ml-auto"
                     : "bg-white text-gray-800 mr-auto"
                 }`}
               >
-                {m.text}
+                {/* Render Markdown */}
+                <div
+                  dangerouslySetInnerHTML={{ __html: formatMarkdown(m.text) }}
+                />
               </div>
             ))}
             <div ref={endRef} />
